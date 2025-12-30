@@ -1,0 +1,6 @@
+{
+    "device": "auto",
+    "model_name": "ViT-B/32",
+    "confidence_threshold": 0.32,
+    "spatial_candidates": 200
+}

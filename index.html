@@ -1,0 +1,613 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Scryglass - Magic Mirror</title>
+    <style>
+        body {
+            margin: 0;
+            background: #121212;
+            color: white;
+            display: flex;
+            height: 100vh;
+            font-family: 'Segoe UI', sans-serif;
+        }
+
+        #main {
+            flex: 1;
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            justify-content: center;
+            position: relative;
+        }
+
+        #sidebar {
+            width: 350px;
+            background: #1e1e1e;
+            border-left: 1px solid #333;
+            padding: 20px;
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+        }
+
+        video {
+            max-width: 100%;
+            max-height: 70vh;
+            cursor: crosshair;
+        }
+
+        #card-image {
+            width: 100%;
+            border-radius: 10px;
+            margin-bottom: 20px;
+            box-shadow: 0 0 20px rgba(0, 0, 0, 0.5);
+        }
+
+        #card-name {
+            font-size: 1.5em;
+            font-weight: bold;
+            margin-bottom: 5px;
+            text-align: center;
+        }
+
+        #card-set {
+            color: #aaa;
+            margin-bottom: 20px;
+        }
+
+        #score {
+            color: #555;
+            font-size: 0.8em;
+        }
+
+        button {
+            padding: 10px 20px;
+            font-size: 1.2em;
+            background: #6200ea;
+            color: white;
+            border: none;
+            border-radius: 5px;
+            cursor: pointer;
+            margin-bottom: 10px;
+        }
+
+        button:hover {
+            background: #7c43bd;
+        }
+
+        .hidden {
+            display: none;
+        }
+
+        #debug-console {
+            width: 100%;
+            max-width: 800px;
+            height: 150px;
+            background: #000;
+            color: #0f0;
+            font-family: monospace;
+            overflow-y: scroll;
+            padding: 10px;
+            margin-top: 10px;
+            border: 1px solid #333;
+            font-size: 0.85em;
+        }
+    </style>
+</head>
+
+<body>
+
+    <div id="main">
+        <button id="btn-share" onclick="startCapture()">Select Discord Window</button>
+
+        <div id="top-bar" class="hidden" style="display: flex; gap: 10px; margin-bottom: 10px; align-items: center;">
+            <button id="btn-mirror" onclick="toggleMirror()" style="background: #00c853;">Mirror Feed: ON</button>
+            <div style="background: #333; padding: 10px 15px; border-radius: 5px; font-weight: bold;">
+                Status: <span id="status-text" style="color: #ff1744;">Initializing AI...</span>
+            </div>
+            <select id="model-select"
+                style="background: #6200ea; color: white; padding: 10px 15px; border: none; border-radius: 5px; font-weight: bold; cursor: pointer;">
+                <option value="dino" selected>🦖 DINOv2 (Best)</option>
+                <option value="clip">📎 CLIP</option>
+            </select>
+        </div>
+
+        <div id="video-container" class="hidden" style="position: relative; display: inline-block; overflow: hidden;">
+            <video id="video" autoplay playsinline></video>
+            <canvas id="overlay-canvas"
+                style="position: absolute; top: 0; left: 0; width: 100%; height: 100%; pointer-events: auto; cursor: crosshair;"></canvas>
+        </div>
+
+        <div id="confirm-bar" class="hidden"
+            style="background: #ff9800; color: #000; padding: 10px; text-align: center; font-weight: bold;">
+            Card detected! <button id="btn-confirm"
+                style="margin-left: 10px; padding: 5px 15px; background: #4caf50; color: white; border: none; border-radius: 3px; cursor: pointer;">✓
+                Confirm & Search</button>
+            <button id="btn-cancel"
+                style="margin-left: 5px; padding: 5px 10px; background: #f44336; color: white; border: none; border-radius: 3px; cursor: pointer;">✗
+                Cancel</button>
+        </div>
+
+        <div id="debug-console" class="hidden">
+            <div>> System Initialized</div>
+        </div>
+    </div>
+
+    <div id="sidebar">
+        <div id="result">
+            <img id="card-image" src="" alt="Select a card" style="display: none;">
+            <div id="card-name">Scryglass Ready</div>
+            <div id="card-set">Click on any card to identify</div>
+            <div id="score"></div>
+        </div>
+
+        <h3
+            style="margin-top: 20px; border-top: 1px solid #444; padding-top: 10px; font-size: 14px; text-transform: uppercase; color: #888;">
+            Top 5 Matches</h3>
+        <div id="candidates-grid"
+            style="display: flex; flex-wrap: wrap; gap: 8px; justify-content: center; padding-top: 5px;"></div>
+    </div>
+
+    <canvas id="canvas" style="display:none;"></canvas>
+
+    <script>
+        const video = document.getElementById('video');
+        const container = document.getElementById('video-container');
+        const canvas = document.getElementById('canvas');
+        const ctx = canvas.getContext('2d');
+        const overlayCanvas = document.getElementById('overlay-canvas');
+        const overlayCtx = overlayCanvas.getContext('2d');
+        const confirmBar = document.getElementById('confirm-bar');
+        const resultImg = document.getElementById('card-image');
+        const resultName = document.getElementById('card-name');
+        const resultSet = document.getElementById('card-set');
+        const scoreDiv = document.getElementById('score');
+        const btnMirror = document.getElementById('btn-mirror');
+        const topBar = document.getElementById('top-bar');
+        const statusText = document.getElementById('status-text');
+        const debugConsole = document.getElementById('debug-console');
+
+        // Detection State Machine
+        let detectionState = 'idle'; // 'idle', 'detected', 'searching'
+        let pendingDetection = null; // Stores the pending search data
+        let currentPolygon = null; // Current detected polygon
+
+        let isMirrored = true; // Default ON
+
+        // Draw polygon overlay on canvas
+        function drawPolygon(polygon, color = '#00ff00', lineWidth = 3) {
+            if (!polygon || polygon.length < 3) return;
+
+            overlayCtx.clearRect(0, 0, overlayCanvas.width, overlayCanvas.height);
+            overlayCtx.strokeStyle = color;
+            overlayCtx.lineWidth = lineWidth;
+            overlayCtx.setLineDash([]);
+
+            overlayCtx.beginPath();
+            overlayCtx.moveTo(polygon[0][0], polygon[0][1]);
+            for (let i = 1; i < polygon.length; i++) {
+                overlayCtx.lineTo(polygon[i][0], polygon[i][1]);
+            }
+            overlayCtx.closePath();
+            overlayCtx.stroke();
+
+            // Add glow effect
+            overlayCtx.shadowColor = color;
+            overlayCtx.shadowBlur = 10;
+            overlayCtx.stroke();
+            overlayCtx.shadowBlur = 0;
+        }
+
+        function clearOverlay() {
+            overlayCtx.clearRect(0, 0, overlayCanvas.width, overlayCanvas.height);
+            currentPolygon = null;
+        }
+
+        function showConfirmBar() {
+            confirmBar.classList.remove('hidden');
+        }
+
+        function hideConfirmBar() {
+            confirmBar.classList.add('hidden');
+        }
+
+        function log(msg) {
+            const line = document.createElement('div');
+            const time = new Date().toLocaleTimeString();
+            line.innerText = `[${time}] ${msg}`;
+            debugConsole.appendChild(line);
+            debugConsole.scrollTop = debugConsole.scrollHeight;
+        }
+
+        function updateMirrorUI() {
+            if (isMirrored) {
+                video.style.transform = "scaleX(-1)";
+                btnMirror.innerText = "Mirror Feed: ON";
+                btnMirror.style.background = "#00c853";
+                log("Feed mirrored (Default).");
+            } else {
+                video.style.transform = "scaleX(1)";
+                btnMirror.innerText = "Mirror Feed: OFF";
+                btnMirror.style.background = "#6200ea";
+                log("Feed un-mirrored.");
+            }
+        }
+
+        // Status Polling
+        async function checkStatus() {
+            try {
+                const res = await fetch('/status');
+                const data = await res.json();
+                if (data.ready) {
+                    if (statusText.innerText !== "System Ready") {
+                        statusText.innerText = "System Ready";
+                        statusText.style.color = "#00e676";
+                        log("Backend reporting READY.");
+                    }
+                } else {
+                    statusText.innerText = "Initializing AI...";
+                    statusText.style.color = "#ff1744";
+                    setTimeout(checkStatus, 1000);
+                }
+            } catch (e) {
+                console.error(e);
+                setTimeout(checkStatus, 2000);
+            }
+        }
+
+        // Start polling immediately
+        checkStatus();
+
+        async function startCapture() {
+            try {
+                const stream = await navigator.mediaDevices.getDisplayMedia({
+                    video: {
+                        cursor: "always",
+                        displaySurface: "window"
+                    },
+                    audio: false
+                });
+                video.srcObject = stream;
+                document.getElementById('btn-share').classList.add('hidden');
+                topBar.classList.remove('hidden');
+                topBar.style.display = 'flex';
+                container.classList.remove('hidden');
+                debugConsole.classList.remove('hidden');
+                log("Video stream started.");
+
+                // Initialize overlay canvas when video metadata loads
+                video.onloadedmetadata = () => {
+                    overlayCanvas.width = video.videoWidth;
+                    overlayCanvas.height = video.videoHeight;
+                    log(`Overlay initialized: ${video.videoWidth}x${video.videoHeight}`);
+                };
+
+                updateMirrorUI();
+
+            } catch (err) {
+                console.error("Error: " + err);
+                log("Error starting capture: " + err);
+            }
+        }
+
+        function toggleMirror() {
+            isMirrored = !isMirrored;
+            if (isMirrored) {
+                video.style.transform = "scaleX(-1)";
+                btnMirror.innerText = "Mirror Feed: ON";
+                btnMirror.style.background = "#00c853";
+                log("Feed mirrored.");
+            } else {
+                video.style.transform = "scaleX(1)";
+                btnMirror.innerText = "Mirror Feed: OFF";
+                btnMirror.style.background = "#6200ea";
+                log("Feed un-mirrored.");
+            }
+        }
+
+        // NOTE: Click handling is now done via overlay canvas mousedown/mouseup events
+        // Small drags (<20px) are treated as clicks
+
+        async function doIdentify(base64Image, x, y, isManualCrop = false) {
+            resultName.innerText = "Analysing...";
+            resultSet.innerText = "Running Computer Vision...";
+            resultImg.style.display = 'none';
+            resultImg.src = "";
+            scoreDiv.innerText = "";
+
+            // Clear previous candidates
+            document.getElementById('candidates-grid').innerHTML = "";
+
+            try {
+                const selectedModel = document.getElementById('model-select').value;
+                const res = await fetch('/identify', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({
+                        image: base64Image,
+                        click_x: x,
+                        click_y: y,
+                        model: selectedModel
+                    })
+                });
+                const data = await res.json();
+
+                // Update overlay canvas size to match video (only if not manual crop)
+                if (!isManualCrop) {
+                    overlayCanvas.width = video.videoWidth;
+                    overlayCanvas.height = video.videoHeight;
+                }
+
+                // Check for error response
+                if (data.error) {
+                    resultName.innerText = "Detection Failed";
+                    resultSet.innerText = data.message || "Try clicking closer to the card center.";
+                    scoreDiv.innerText = "";
+                    resultImg.style.display = 'none';
+                    statusText.innerText = "Detection Failed";
+                    statusText.style.color = "#f44336";
+                    log(`ERROR: ${data.message || data.error}`);
+                    return;
+                }
+
+                // Draw detected polygon on overlay (skip for manual crops - user already selected)
+                if (data.detected_polygon && !isManualCrop) {
+                    const color = data.fallback_used ? '#ff9800' : '#00ff00'; // Orange for fallback, green for success
+                    drawPolygon(data.detected_polygon, color);
+                    log(`Card boundary detected${data.fallback_used ? ' (fallback)' : ''}`);
+                }
+
+                if (data.candidates) {
+                    renderCandidates(data.candidates);
+                }
+
+                if (data.match) {
+                    resultImg.src = data.match.image; // FIX: Use .image instead of .high_res_url
+                    resultImg.style.display = 'block';
+                    resultImg.style.opacity = '1.0';
+                    resultImg.style.border = "none";
+
+                    resultName.innerText = data.match.name;
+                    resultSet.innerText = data.match.set;
+                    scoreDiv.innerText = "Confidence: " + (data.score).toFixed(3);
+                    statusText.innerText = "Match Found";
+                    statusText.style.color = "#00e676"; // Green
+                    log(`SUCCESS: Found '${data.match.name}' (${(data.score * 100).toFixed(1)}%)`);
+                } else {
+                    resultName.innerText = "No Match Found";
+                    resultSet.innerText = "Try clicking the card center.";
+                    statusText.innerText = "No Match / Low Confidence";
+                    statusText.style.color = "#ff1744"; // Red
+
+                    if (data.best_guess) {
+                        const n = data.best_guess.name || "Unknown";
+                        log(`FAILURE: Best guess: '${n}' (${(data.score * 100).toFixed(1)}%) (Threshold not met)`);
+
+                        if (data.best_guess.High_res_url) { // NOTE: Backend keys might differ, check this? actually index_map uses high_res_url
+                            // Wait, 'best_guess' in backend is just a string now? 
+                            // No, in line 370 I check: debug_info["best_guess"] = best_guess_item["name"]
+                            // BUT I return best_guess as the NAME string. 
+                            // Wait, I need to check app.py response structure.
+                            // Line 370: debug_info["best_guess"] = best_guess_item["name"] -> It's a STRING!
+                            // Line 323 logic in index.html assumed it was an OBJECT. 
+                            // This 'best_guess' display logic was broken in previous edits?
+                            // I'll rely on 'candidates' now mainly.
+                        }
+
+                        // Let's use the first candidate as the visual "best guess" if present
+                        if (data.candidates && data.candidates.length > 0) {
+                            const bg = data.candidates[0];
+                            resultImg.src = bg.image;
+                            resultImg.style.display = 'block';
+                            resultImg.style.opacity = '1.0';
+                            resultImg.style.border = "none";
+                            resultName.innerText = "Best Guess: " + bg.name;
+                        }
+
+                        scoreDiv.innerText = "Best Guess: " + (data.score).toFixed(3);
+                    } else if (data.score) {
+                        log(`FAILURE: Best guess score ${(data.score * 100).toFixed(1)}% (Threshold not met)`);
+                        scoreDiv.innerText = "Best Guess: " + (data.score).toFixed(3);
+                    } else {
+                        log("FAILURE: No potential match found.");
+                    }
+                }
+            } catch (e) {
+                console.error(e);
+                resultName.innerText = "Error";
+                statusText.innerText = "Error";
+                statusText.style.color = "#ff1744";
+                log("ERROR: " + e);
+            }
+        }
+
+        function renderCandidates(list) {
+            const grid = document.getElementById('candidates-grid');
+            grid.innerHTML = "";
+            list.forEach(c => {
+                const div = document.createElement('div');
+                div.style.textAlign = 'center';
+                div.style.cursor = 'pointer';
+                div.title = c.name + " (" + c.set + ")";
+
+                div.onclick = () => {
+                    // Force select
+                    resultImg.src = c.image;
+                    resultName.innerText = c.name;
+                    resultSet.innerText = c.set;
+                    scoreDiv.innerText = "Selected manually (" + (c.score * 100).toFixed(1) + "%)";
+                    resultImg.style.display = 'block';
+                    resultImg.style.opacity = '1.0';
+                    statusText.innerText = "Manual Selection";
+                    statusText.style.color = "#00e676";
+                };
+
+                const img = document.createElement('img');
+                img.src = c.image;
+                img.style.width = '60px';
+                img.style.height = '84px';
+                img.style.objectFit = 'cover';
+                img.style.borderRadius = '4px';
+                img.style.border = '1px solid #555';
+
+                const score = document.createElement('div');
+                score.innerText = (c.score * 100).toFixed(0) + "%";
+                score.style.fontSize = "10px";
+                score.style.color = "#ccc";
+                score.style.marginTop = "2px";
+
+                div.appendChild(img);
+                div.appendChild(score);
+                grid.appendChild(div);
+            });
+        }
+
+        // ========== DRAG-SELECT FEATURE ==========
+        let isDragging = false;
+        let dragStart = null;
+        let dragEnd = null;
+
+        // Pointer events and cursor now set in HTML
+
+        overlayCanvas.addEventListener('mousedown', (e) => {
+            // Guard: video must be active and have dimensions
+            if (!video.srcObject || video.videoWidth === 0) return;
+            // Guard: overlay canvas must be sized
+            if (overlayCanvas.width === 0 || overlayCanvas.height === 0) return;
+
+            const rect = overlayCanvas.getBoundingClientRect();
+            // Guard: canvas must be visible
+            if (rect.width === 0) return;
+
+            // Scale from display coordinates to canvas internal coordinates
+            const scaleX = overlayCanvas.width / rect.width;
+            const scaleY = overlayCanvas.height / rect.height;
+
+            isDragging = true;
+            dragStart = {
+                x: (e.clientX - rect.left) * scaleX,
+                y: (e.clientY - rect.top) * scaleY
+            };
+            dragEnd = { ...dragStart };
+        });
+
+        overlayCanvas.addEventListener('mousemove', (e) => {
+            if (!isDragging || !dragStart) return;
+
+            const rect = overlayCanvas.getBoundingClientRect();
+            // Scale from display coordinates to canvas internal coordinates  
+            const scaleX = overlayCanvas.width / rect.width;
+            const scaleY = overlayCanvas.height / rect.height;
+
+            dragEnd = {
+                x: (e.clientX - rect.left) * scaleX,
+                y: (e.clientY - rect.top) * scaleY
+            };
+
+            // Draw selection rectangle
+            overlayCtx.clearRect(0, 0, overlayCanvas.width, overlayCanvas.height);
+            overlayCtx.strokeStyle = '#00bcd4';
+            overlayCtx.lineWidth = 2;
+            overlayCtx.setLineDash([5, 5]);
+
+            const x = Math.min(dragStart.x, dragEnd.x);
+            const y = Math.min(dragStart.y, dragEnd.y);
+            const w = Math.abs(dragEnd.x - dragStart.x);
+            const h = Math.abs(dragEnd.y - dragStart.y);
+
+            overlayCtx.strokeRect(x, y, w, h);
+            overlayCtx.setLineDash([]);
+        });
+
+        overlayCanvas.addEventListener('mouseup', async (e) => {
+            if (!isDragging) return;
+            isDragging = false;
+
+            const x = Math.min(dragStart.x, dragEnd.x);
+            const y = Math.min(dragStart.y, dragEnd.y);
+            const w = Math.abs(dragEnd.x - dragStart.x);
+            const h = Math.abs(dragEnd.y - dragStart.y);
+
+            // Ignore tiny drags (treat as clicks)
+            if (w < 20 || h < 20) {
+                // Trigger normal click detection at center
+                const centerX = Math.round(x + w / 2);
+                const centerY = Math.round(y + h / 2);
+
+                // Capture frame
+                canvas.width = video.videoWidth;
+                canvas.height = video.videoHeight;
+                if (isMirrored) {
+                    ctx.save();
+                    ctx.scale(-1, 1);
+                    ctx.drawImage(video, -video.videoWidth, 0);
+                    ctx.restore();
+                } else {
+                    ctx.drawImage(video, 0, 0);
+                }
+                const dataURL = canvas.toDataURL('image/jpeg', 0.8);
+                doIdentify(dataURL, centerX, centerY);
+                return;
+            }
+
+            // Manual crop - draw solid selection
+            overlayCtx.clearRect(0, 0, overlayCanvas.width, overlayCanvas.height);
+            overlayCtx.strokeStyle = '#00bcd4';
+            overlayCtx.lineWidth = 3;
+            overlayCtx.strokeRect(x, y, w, h);
+
+            log(`Manual selection: ${Math.round(w)}x${Math.round(h)} at (${Math.round(x)}, ${Math.round(y)})`);
+
+            // Capture frame and crop
+            canvas.width = video.videoWidth;
+            canvas.height = video.videoHeight;
+            if (isMirrored) {
+                ctx.save();
+                ctx.scale(-1, 1);
+                ctx.drawImage(video, -video.videoWidth, 0);
+                ctx.restore();
+            } else {
+                ctx.drawImage(video, 0, 0);
+            }
+
+            // Crop to selection
+            const cropCanvas = document.createElement('canvas');
+            cropCanvas.width = w;
+            cropCanvas.height = h;
+            const cropCtx = cropCanvas.getContext('2d');
+            cropCtx.drawImage(canvas, x, y, w, h, 0, 0, w, h);
+
+            const cropDataURL = cropCanvas.toDataURL('image/jpeg', 0.8);
+
+            // Draw the user's selection on the overlay (keep it visible)
+            clearOverlay();
+            overlayCtx.strokeStyle = '#00bcd4';
+            overlayCtx.lineWidth = 3;
+            overlayCtx.strokeRect(x, y, w, h);
+
+            // Send manual crop to backend (center of the crop, with isManualCrop flag)
+            doIdentify(cropDataURL, Math.round(w / 2), Math.round(h / 2), true);
+        });
+
+        // Confirm bar buttons
+        document.getElementById('btn-confirm').addEventListener('click', () => {
+            hideConfirmBar();
+            log("Search confirmed by user.");
+        });
+
+        document.getElementById('btn-cancel').addEventListener('click', () => {
+            hideConfirmBar();
+            clearOverlay();
+            resultName.innerText = "Cancelled";
+            resultSet.innerText = "Click on a card to try again";
+            log("Search cancelled by user.");
+        });
+    </script>
+
+</body>
+
+</html>

@@ -1,3 +1,14 @@
+# Custom, specific to scryglass project
+debug/
+images/
+default-cards*.json
+index_map*.json
+*.csv
+card_list.txt
+*.index
+*.pt
+tidus_cards.json
+
 # Byte-compiled / optimized / DLL files
 __pycache__/
 *.py[codz]

@@ -1,0 +1,15 @@
+fastapi
+uvicorn
+opencv-python
+pillow
+faiss-cpu
+scipy
+ftfy
+regex
+tqdm
+pydantic
+git+https://github.com/openai/CLIP.git
+--extra-index-url https://download.pytorch.org/whl/cu118
+torch
+torchvision
+torchaudio
