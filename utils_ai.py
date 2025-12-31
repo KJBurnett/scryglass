@@ -125,3 +125,108 @@ def spatial_verification(crop_art, crop_full, ref_art, ref_full):
     sim_full = (crop_full * ref_full_p).sum(dim=1)
     
     return max(get_top_k_score(sim_art), get_top_k_score(sim_full))
+
+def learn_new_vector(pil_image, card_id, save_path):
+    """
+    Live learns a new vector for a card and adds it to the running index.
+    """
+    if "dino" not in models or "dino" not in indices:
+        print("Error: DINOv2 model or index not loaded.")
+        return False
+
+    try:
+        model = models["dino"]
+        preprocess = preprocessors["dino"]
+        index = indices["dino"]
+        index_map = index_maps["dino"]
+        
+        # 1. Compute Vector
+        image_tensor = preprocess(pil_image).unsqueeze(0).to(device)
+        
+        with torch.no_grad():
+            features = model(image_tensor)
+            features = features / features.norm(dim=-1, keepdim=True)
+            
+        vector = features.cpu().numpy().astype('float32')
+        
+        # 2. Add to FAISS
+        index.add(vector)
+        
+        # 3. Add to Metadata Map
+        # Find existing metadata for this card to clone
+        existing_meta = next((item for item in index_map if item["scryfall_id"] == card_id), None)
+        
+        if existing_meta:
+             new_entry = existing_meta.copy()
+             new_entry["faiss_id"] = len(index_map) # New ID is current length (0-indexed)
+             new_entry["image_path"] = save_path
+             new_entry["learned"] = True # Flag to indicate custom user data
+        else:
+            # Fallback if we somehow learned a card we don't know (unlikely flow)
+            new_entry = {
+                "faiss_id": len(index_map),
+                "scryfall_id": card_id,
+                "name": "Unknown Learned Card",
+                "set": "???",
+                "image_path": save_path,
+                "learned": True
+            }
+            
+        index_map.append(new_entry)
+        print(f"Successfully learned new view for {new_entry['name']} (Total vectors: {index.ntotal})")
+        return True
+        
+    except Exception as e:
+        print(f"Error learning new vector: {e}")
+        return False
+
+# --- Runtime Patch Generation for Learned Cards ---
+learned_patches = {}
+
+def get_learned_patch(image_path):
+    """
+    Returns (or computes and caches) the DINOv2 feature patch for a learned image.
+    Returns: dict {"full": tensor} (Art is same as full effectively)
+    """
+    global learned_patches
+    
+    # Check cache
+    if image_path in learned_patches:
+        return learned_patches[image_path]
+        
+    if "dino" not in models: return None
+    
+    try:
+        from PIL import Image
+        if not os.path.exists(image_path): return None
+        
+        pil = Image.open(image_path).convert("RGB")
+        
+        # Preprocess
+        # We need to maintain aspect ratio logic? 
+        # The stored learned image is already a crop. We should probably just center crop/resize 
+        # to standard 224x224 input for the patch generation to match the query flow.
+        preprocess = preprocessors["dino"]
+        tensor = preprocess(pil).unsqueeze(0).to(device)
+        
+        model = models["dino"]
+        
+        with torch.no_grad():
+             # Get spatial features (n=1, reshape=True)
+             layers = model.get_intermediate_layers(tensor, n=1, reshape=True)
+             # Shape: [1, 768, 16, 16] (for 224x224)
+             patch = F.normalize(layers[0], p=2, dim=1)
+             
+        # Store in cache
+        # We perform spatial verification on 'full' mostly.
+        # We can duplicate for 'art' to satisfy function signature if needed.
+        data = {
+            "art": patch, # Just use full as art
+            "full": patch
+        }
+        learned_patches[image_path] = data
+        return data
+        
+    except Exception as e:
+        print(f"Error computing patch for {image_path}: {e}")
+        return None

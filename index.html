@@ -114,6 +114,8 @@
                 <option value="dino" selected>🦖 DINOv2 (Best)</option>
                 <option value="clip">📎 CLIP</option>
             </select>
+            <button onclick="openManager()" style="background: #ff9800; font-size: 0.9em; padding: 8px 15px;">📂 Learned
+                Cards</button>
         </div>
 
         <div id="video-container" class="hidden" style="position: relative; display: inline-block; overflow: hidden;">
@@ -135,6 +137,23 @@
         <div id="debug-console" class="hidden">
             <div>> System Initialized</div>
         </div>
+
+        <!-- Manager Modal -->
+        <div id="manager-modal" class="hidden"
+            style="position: fixed; top: 0; left: 0; width: 100%; height: 100%; background: rgba(0,0,0,0.85); z-index: 1000; align-items: center; justify-content: center;">
+            <div
+                style="background: #1e1e1e; width: 80%; max-width: 800px; max-height: 80%; border-radius: 10px; padding: 20px; display: flex; flex-direction: column; border: 1px solid #444;">
+                <div style="display: flex; justify-content: space-between; margin-bottom: 20px;">
+                    <h2 style="margin: 0;">Manage Learned Cards</h2>
+                    <button onclick="closeManager()"
+                        style="background: #f44336; padding: 5px 15px; font-size: 1rem;">Close</button>
+                </div>
+                <div id="manager-list"
+                    style="flex: 1; overflow-y: auto; display: flex; flex-direction: column; gap: 10px;">
+                    <!-- Items go here -->
+                </div>
+            </div>
+        </div>
     </div>
 
     <div id="sidebar">
@@ -143,6 +162,10 @@
             <div id="card-name">Scryglass Ready</div>
             <div id="card-set">Click on any card to identify</div>
             <div id="score"></div>
+            <button id="btn-learn" onclick="learnCurrentCard()" class="hidden"
+                style="margin-top: 15px; background: #2196f3; width: 100%; font-size: 1rem;">
+                🧠 Learn this Card
+            </button>
         </div>
 
         <h3
@@ -175,6 +198,9 @@
         let detectionState = 'idle'; // 'idle', 'detected', 'searching'
         let pendingDetection = null; // Stores the pending search data
         let currentPolygon = null; // Current detected polygon
+
+        let currentCroppedImage = null; // Base64 of current crop
+        let currentSelectedId = null;   // ID of currently shown card
 
         let isMirrored = true; // Default ON
 
@@ -318,6 +344,10 @@
             resultImg.style.display = 'none';
             resultImg.src = "";
             scoreDiv.innerText = "";
+            document.getElementById('btn-learn').classList.add('hidden'); // Hide learn button
+            currentCroppedImage = null; // Clear old
+            currentSelectedId = null;
+
 
             // Clear previous candidates
             document.getElementById('candidates-grid').innerHTML = "";
@@ -335,6 +365,14 @@
                     })
                 });
                 const data = await res.json();
+
+                // Store the backend-provided crop for learning if available
+                if (data.crop_b64) {
+                    currentCroppedImage = data.crop_b64;
+                } else if (isManualCrop) {
+                    // If manual crop, we already sent the crop as base64Image
+                    currentCroppedImage = base64Image;
+                }
 
                 // Update overlay canvas size to match video (only if not manual crop)
                 if (!isManualCrop) {
@@ -376,7 +414,13 @@
                     scoreDiv.innerText = "Confidence: " + (data.score).toFixed(3);
                     statusText.innerText = "Match Found";
                     statusText.style.color = "#00e676"; // Green
-                    log(`SUCCESS: Found '${data.match.name}' (${(data.score * 100).toFixed(1)}%)`);
+
+                    // Enable Learning
+                    currentSelectedId = data.match.scryfall_id; // Ensure backend returns this!
+                    document.getElementById('btn-learn').classList.remove('hidden');
+
+                    const tag = data.match.learned ? "[LEARNED] " : "";
+                    log(`SUCCESS: Found '${tag}${data.match.name}' (${(data.score * 100).toFixed(1)}%)`);
                 } else {
                     resultName.innerText = "No Match Found";
                     resultSet.innerText = "Try clicking the card center.";
@@ -386,17 +430,6 @@
                     if (data.best_guess) {
                         const n = data.best_guess.name || "Unknown";
                         log(`FAILURE: Best guess: '${n}' (${(data.score * 100).toFixed(1)}%) (Threshold not met)`);
-
-                        if (data.best_guess.High_res_url) { // NOTE: Backend keys might differ, check this? actually index_map uses high_res_url
-                            // Wait, 'best_guess' in backend is just a string now? 
-                            // No, in line 370 I check: debug_info["best_guess"] = best_guess_item["name"]
-                            // BUT I return best_guess as the NAME string. 
-                            // Wait, I need to check app.py response structure.
-                            // Line 370: debug_info["best_guess"] = best_guess_item["name"] -> It's a STRING!
-                            // Line 323 logic in index.html assumed it was an OBJECT. 
-                            // This 'best_guess' display logic was broken in previous edits?
-                            // I'll rely on 'candidates' now mainly.
-                        }
 
                         // Let's use the first candidate as the visual "best guess" if present
                         if (data.candidates && data.candidates.length > 0) {
@@ -444,6 +477,10 @@
                     resultImg.style.opacity = '1.0';
                     statusText.innerText = "Manual Selection";
                     statusText.style.color = "#00e676";
+
+                    // Enable Learning
+                    currentSelectedId = c.scryfall_id;
+                    document.getElementById('btn-learn').classList.remove('hidden');
                 };
 
                 const img = document.createElement('img');
@@ -606,6 +643,101 @@
             resultSet.innerText = "Click on a card to try again";
             log("Search cancelled by user.");
         });
+
+
+        // ========== LEARNING FEATURES ==========
+
+        async function learnCurrentCard() {
+            if (!currentCroppedImage || !currentSelectedId) return;
+
+            // No confirmation prompt, just do it.
+            log("Learning new view for " + resultName.innerText + "...");
+
+            try {
+                const res = await fetch('/learn', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({
+                        image: currentCroppedImage,
+                        scryfall_id: currentSelectedId
+                    })
+                });
+                const data = await res.json();
+                if (data.status === 'success') {
+                    log("SUCCESS: Learned " + resultName.innerText + ". AI Index updated.");
+                    // No alert user, just log
+                } else {
+                    log("Error learning card: " + data.detail);
+                }
+            } catch (e) {
+                console.error(e);
+                log("Error learning card: " + e);
+            }
+        }
+
+        async function openManager() {
+            const modal = document.getElementById('manager-modal');
+            const list = document.getElementById('manager-list');
+            modal.style.display = 'flex'; // Override hidden class
+            modal.classList.remove('hidden');
+            list.innerHTML = "Loading...";
+
+            try {
+                const res = await fetch('/learned');
+                const files = await res.json();
+
+                list.innerHTML = "";
+                if (files.length === 0) {
+                    list.innerHTML = "<div style='padding:20px; text-align:center;'>No learned cards yet.</div>";
+                    return;
+                }
+
+                files.forEach(f => {
+                    const row = document.createElement('div');
+                    row.style.display = 'flex';
+                    row.style.alignItems = 'center';
+                    row.style.background = '#333';
+                    row.style.padding = '10px';
+                    row.style.borderRadius = '5px';
+                    row.style.gap = '15px';
+
+                    row.innerHTML = `
+                        <img src="${f.image_url}" style="height: 60px; border-radius: 4px;">
+                        <div style="flex: 1;">
+                            <div style="font-weight: bold; font-size: 1.1em;">${f.name}</div>
+                            <div style="font-size: 0.8em; color: #aaa;">${f.filename}</div>
+                        </div>
+                        <button onclick="deleteCard('${f.filename}')" style="background: #f44336; font-size: 0.9em; padding: 5px 10px; margin: 0;">Delete</button>
+                    `;
+                    list.appendChild(row);
+                });
+
+            } catch (e) {
+                list.innerHTML = "Error loading list.";
+            }
+        }
+
+        function closeManager() {
+            document.getElementById('manager-modal').classList.add('hidden');
+            document.getElementById('manager-modal').style.display = 'none';
+        }
+
+        async function deleteCard(filename) {
+            if (!confirm("Are you sure you want to delete this learned view?")) return;
+
+            try {
+                const res = await fetch('/learn/' + filename, { method: 'DELETE' });
+                const data = await res.json();
+                if (data.status === 'success') {
+                    openManager(); // Refresh
+                } else {
+                    alert("Error");
+                }
+            } catch (e) {
+                alert("Error: " + e);
+            }
+        }
+
     </script>
 
 </body>

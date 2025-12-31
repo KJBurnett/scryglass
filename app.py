@@ -36,6 +36,118 @@ class IdentifyRequest(BaseModel):
     click_y: int
     model: str = "dino"
 
+class LearnRequest(BaseModel):
+    image: str # base64 cropped image (the one the user confirmed)
+    scryfall_id: str
+
+@app.post("/learn")
+async def learn_card(req: LearnRequest):
+    try:
+        # 1. Decode Image
+        if "," in req.image:
+             _, encoded = req.image.split(",", 1)
+        else:
+             encoded = req.image
+             
+        image_data = base64.b64decode(encoded)
+        pil_image = Image.open(io.BytesIO(image_data)).convert("RGB")
+        
+        # 2. Save to Disk (Persistence)
+        learning_dir = "images/learning"
+        os.makedirs(learning_dir, exist_ok=True)
+        
+        timestamp = time.strftime("%Y%m%d_%H%M%S")
+        filename = f"{req.scryfall_id}_{timestamp}.jpg"
+        save_path = os.path.join(learning_dir, filename)
+        
+        pil_image.save(save_path)
+        
+        # 3. Learn (Live Update)
+        success = utils_ai.learn_new_vector(pil_image, req.scryfall_id, save_path)
+        
+        if success:
+            return {"status": "success", "message": f"Learned new view for {req.scryfall_id}"}
+        else:
+            raise HTTPException(status_code=500, detail="Failed to update AI index")
+            
+    except Exception as e:
+        print(f"Learn Error: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+    except Exception as e:
+        print(f"Learn Error: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.get("/learned")
+async def get_learned_cards():
+    """List all user-learned cards"""
+    learning_dir = "images/learning"
+    if not os.path.exists(learning_dir):
+        return []
+    
+    files = []
+    # Get index map to lookup names
+    dino_map = utils_ai.index_maps.get("dino", [])
+    
+    for f in os.listdir(learning_dir):
+        if f.endswith(".jpg"):
+            # Extract ID (first 36 chars)
+            card_id = f[:36]
+            
+            # Find name and ref image
+            meta = next((item for item in dino_map if item["scryfall_id"] == card_id), None)
+            name = meta["name"] if meta else "Unknown"
+            ref_image = meta["high_res_url"] if meta else ""
+            
+            files.append({
+                "filename": f,
+                "card_id": card_id,
+                "name": name,
+                "image_url": f"/images/learning/{f}",
+                "ref_image_url": ref_image
+            })
+            
+    # Sort by newest first (filename has timestamp)
+    files.sort(key=lambda x: x["filename"], reverse=True)
+    return files
+
+@app.delete("/learn/{filename}")
+async def delete_learned_card(filename: str):
+    """Delete a learned card and remove from runtime memory"""
+    try:
+        learning_dir = "images/learning"
+        path = os.path.join(learning_dir, filename)
+        
+        if os.path.exists(path):
+            os.remove(path)
+            
+            # Remove from runtime memory if possible
+            # We can't easily remove from FAISS IndexFlatIP without rebuild
+            # BUT we can remove from `index_map` so it's never returned as a result!
+            if "dino" in utils_ai.index_maps:
+                # Filter out the entry that points to this file
+                # The image_path in index_map might be relative or absolute, need to check match
+                # utils_ai saves it as `images/learning/filename`
+                
+                target_path = os.path.join("images", "learning", filename).replace("\\", "/") # normalize separators?
+                
+                # Simple containment check on the filename part
+                utils_ai.index_maps["dino"] = [
+                    item for item in utils_ai.index_maps["dino"] 
+                    if filename not in item.get("image_path", "")
+                ]
+                
+            return {"status": "success", "message": "Deleted"}
+        else:
+            raise HTTPException(status_code=404, detail="File not found")
+            
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+# Mount static images for the frontend to see them
+from fastapi.staticfiles import StaticFiles
+app.mount("/images", StaticFiles(directory="images"), name="images")
+
 @app.on_event("startup")
 async def startup_event():
     utils_ai.load_models_global()
@@ -246,7 +358,9 @@ async def identify_card(req: IdentifyRequest):
                         "global_score": float(D[r_idx][k]),
                         "scryfall_id": card.get('scryfall_id'),
                         "color_identity": card.get('color_identity', []),
-                        "image": card['high_res_url'] or card['image_path']
+                        "image": card['high_res_url'] or card['image_path'],
+                        "image_path": card['image_path'], # Explicitly store local path for learning verification
+                        "learned": card.get('learned', False)
                     })
 
         # --- 3. VERIFICATION PHASE ---
@@ -255,6 +369,73 @@ async def identify_card(req: IdentifyRequest):
         
         for cand in initial_candidates:
             sid = cand['scryfall_id']
+            
+            # If this is a user-learned view, we now perform Spatial Verification against the LEARNED image.
+            # This ensures robustness to rotation (handled by spatial check) while avoiding false positives
+            # (which would fail spatial check against the learned image).
+            if cand.get("learned", False):
+                 # Try to get/compute patch for this specific learned file
+                 # FIX: Use 'image_path', not 'image' (which might be a Scryfall URL)
+                 l_path = cand['image_path'] 
+                 
+                 patch_data = utils_ai.get_learned_patch(l_path)
+                 
+                 if patch_data:
+                     # Run Spatial Verification!
+                     ref_art = patch_data["art"] # Already on device
+                     ref_full = patch_data["full"]
+                     
+                     # Spatial Check 0
+                     score_0 = utils_ai.spatial_verification(crop_art_0, crop_full_0, ref_art, ref_full)
+                     # Spatial Check 180
+                     score_180 = utils_ai.spatial_verification(crop_art_180, crop_full_180, ref_art, ref_full)
+                     
+                     # Result
+                     spatial_score = max(score_0, score_180)
+                     
+                     
+                     # STRICT GATE: Learned cards must match their memory strongly (> 0.6)
+                     # or we reject them as false positives from other cards.
+                     if spatial_score < 0.6:
+                         print(f"REJECTED Learned '{cand['name']}': Spatial {spatial_score:.3f} < 0.6")
+                         # Penalize heavily to prevent winning
+                         final_score = 0.0
+                     else:
+                         # JEALOUSY CHECK: Does it look at least vaguely like the real card?
+                         # Prevents "Blurry Yuna" from claiming "Tidus" just because Tidus looks like a blur.
+                         pristine_score = 1.0 # Default pass if no patches
+                         if sid in utils_ai.art_patches:
+                             p_data = utils_ai.art_patches[sid]
+                             p_ref_art = p_data["art"].to(utils_ai.device)
+                             p_ref_full = p_data["full"].to(utils_ai.device)
+                             
+                             p_score_0 = utils_ai.spatial_verification(crop_art_0, crop_full_0, p_ref_art, p_ref_full)
+                             p_score_180 = utils_ai.spatial_verification(crop_art_180, crop_full_180, p_ref_art, p_ref_full)
+                             pristine_score = max(p_score_0, p_score_180)
+                         
+                         if pristine_score < 0.25 and spatial_score < 0.85:
+                             print(f"REJECTED Learned '{cand['name']}': Jealousy Check Failed (Pristine {pristine_score:.3f} < 0.25)")
+                             final_score = 0.0
+                         else:
+                             print(f"Verified Learned '{cand['name']}': Global={cand['global_score']:.3f}, Spatial={spatial_score:.3f}, Pristine={pristine_score:.3f}")
+                             # High score for good match
+                             final_score = (0.4 * cand["global_score"]) + (0.6 * spatial_score)
+                     
+                     all_candidates.append({
+                         **cand, 
+                         "score": final_score,
+                         "spatial_verification": spatial_score
+                     })
+                     continue
+                 else:
+                     print(f"Warning: Could not load patch for learned card {cand['name']}")
+                     # Fallback to trust if basic score is high, else penalize
+                     if cand["global_score"] > 0.85:
+                         all_candidates.append({**cand, "score": cand["global_score"], "spatial_verification": 1.0})
+                     else:
+                         all_candidates.append({**cand, "score": cand["global_score"] * 0.8, "spatial_verification": 0.0})
+                     continue
+
             if sid in utils_ai.art_patches:
                 data = utils_ai.art_patches[sid]
                 ref_art = data["art"].to(utils_ai.device)
@@ -314,13 +495,31 @@ async def identify_card(req: IdentifyRequest):
         with open(f"{debug_dir}/info.json", "w") as f:
             json.dump(debug_info, f, indent=2)
             
+        # Encode the warped (used) crop to base64 to return to frontend for potential learning
+        # We use 'warped' which is the BGR numpy array
+        if warped is not None:
+             # Convert to RGB for PIL
+             warped_rgb = cv2.cvtColor(warped, cv2.COLOR_BGR2RGB)
+             pil_warped = Image.fromarray(warped_rgb)
+             
+             buff = io.BytesIO()
+             pil_warped.save(buff, format="JPEG")
+             crop_b64 = base64.b64encode(buff.getvalue()).decode("utf-8")
+        else:
+             crop_b64 = None
+
+        if debug_info.get("success") and best:
+             tag = "[LEARNED] " if best.get("learned", False) else ""
+             print(f"Selection Winner: {tag}{best['name']} (Score: {best['score']:.3f})")
+
         return {
             "detected_polygon": debug_info.get("detected_polygon"),
             "fallback_used": debug_info.get("fallback_used", False),
             "candidates": top_5,
             "match": best if debug_info["success"] else None,
             "score": best['score'] if best else 0.0,
-            "best_guess": best
+            "best_guess": best,
+            "crop_b64": crop_b64 
         }
     
     except Exception as e:
