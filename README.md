@@ -18,6 +18,35 @@ Scryglass is a high-performance computer vision application designed to identify
 -   **`utils_config.py`**: Configuration management.
 -   **`index.html`**: The frontend debug interface.
 -   **`build_patch_index.py`**: Script to generate the DINOv2 patch index from card images.
+-   **`card-database/`**: Tools for building and managing the card image database.
+
+## Card Database Builder
+
+We use a custom tool to fetch thousands of card images from decklists.
+
+### 1. Initialize / Add Decks
+To build or expand your database, use the `build_card_database.py` script. It accepts Archidekt or Moxfield URLs.
+
+**Single Deck:**
+```bash
+python card-database/build_card_database.py --url "https://archidekt.com/decks/6821707/..."
+```
+
+**Bulk Import (File):**
+Create a text file (e.g., `decks.txt`) with one URL per line, then run:
+```bash
+python card-database/build_card_database.py --file decks.txt
+```
+
+### 2. Resetting
+To clear mappings or images and start fresh:
+```bash
+# Clear mappings only (keeps images)
+python card-database/build_card_database.py --clear-mappings
+
+# Clear EVERYTHING
+python card-database/build_card_database.py --clear-mappings --clear-images
+```
 
 ## Setup & Running
 
