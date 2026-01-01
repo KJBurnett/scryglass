@@ -104,18 +104,18 @@
     <div id="main">
         <button id="btn-share" onclick="startCapture()">Select Discord Window</button>
 
+        <!-- Top Right Buttons -->
+        <div style="position: absolute; top: 20px; right: 20px; display: flex; gap: 10px; z-index: 10;">
+            <button onclick="openManager()"
+                style="background: #ff9800; font-size: 0.9em; padding: 8px 15px; box-shadow: 0 2px 5px rgba(0,0,0,0.5);">📂
+                Learned Cards</button>
+        </div>
+
         <div id="top-bar" class="hidden" style="display: flex; gap: 10px; margin-bottom: 10px; align-items: center;">
             <button id="btn-mirror" onclick="toggleMirror()" style="background: #00c853;">Mirror Feed: ON</button>
             <div style="background: #333; padding: 10px 15px; border-radius: 5px; font-weight: bold;">
                 Status: <span id="status-text" style="color: #ff1744;">Initializing AI...</span>
             </div>
-            <select id="model-select"
-                style="background: #6200ea; color: white; padding: 10px 15px; border: none; border-radius: 5px; font-weight: bold; cursor: pointer;">
-                <option value="dino" selected>🦖 DINOv2 (Best)</option>
-                <option value="clip">📎 CLIP</option>
-            </select>
-            <button onclick="openManager()" style="background: #ff9800; font-size: 0.9em; padding: 8px 15px;">📂 Learned
-                Cards</button>
         </div>
 
         <div id="video-container" class="hidden" style="position: relative; display: inline-block; overflow: hidden;">
@@ -353,7 +353,7 @@
             document.getElementById('candidates-grid').innerHTML = "";
 
             try {
-                const selectedModel = document.getElementById('model-select').value;
+                // Removed model selector, hardcoded to dino
                 const res = await fetch('/identify', {
                     method: 'POST',
                     headers: { 'Content-Type': 'application/json' },
@@ -361,7 +361,7 @@
                         image: base64Image,
                         click_x: x,
                         click_y: y,
-                        model: selectedModel
+                        model: 'dino'
                     })
                 });
                 const data = await res.json();
@@ -392,7 +392,7 @@
                     return;
                 }
 
-                // Draw detected polygon on overlay (skip for manual crops - user already selected)
+                // Draw detected detected polygon on overlay (skip for manual crops - user already selected)
                 if (data.detected_polygon && !isManualCrop) {
                     const color = data.fallback_used ? '#ff9800' : '#00ff00'; // Orange for fallback, green for success
                     drawPolygon(data.detected_polygon, color);
@@ -411,7 +411,14 @@
 
                     resultName.innerText = data.match.name;
                     resultSet.innerText = data.match.set;
-                    scoreDiv.innerText = "Confidence: " + (data.score).toFixed(3);
+
+                    // NEW: Show if Learned Card
+                    let scoreText = "Confidence: " + (data.score).toFixed(3);
+                    if (data.match.learned) {
+                        scoreText += " (Learned Card)";
+                    }
+                    scoreDiv.innerText = scoreText;
+
                     statusText.innerText = "Match Found";
                     statusText.style.color = "#00e676"; // Green
 

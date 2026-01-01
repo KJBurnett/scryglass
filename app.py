@@ -365,117 +365,115 @@ async def identify_card(req: IdentifyRequest):
 
         # --- 3. VERIFICATION PHASE ---
         print(f"Verifying {len(initial_candidates)} candidates...")
-        all_candidates = []
+        
+        # Pass 1: Compute Raw Spatial Scores for everyone
+        processed_candidates = []
+        standard_scores = []
+        learned_scores = []
         
         for cand in initial_candidates:
             sid = cand['scryfall_id']
+            is_learned = cand.get("learned", False)
+            raw_spatial = 0.0
             
-            # If this is a user-learned view, we now perform Spatial Verification against the LEARNED image.
-            # This ensures robustness to rotation (handled by spatial check) while avoiding false positives
-            # (which would fail spatial check against the learned image).
-            if cand.get("learned", False):
-                 # Try to get/compute patch for this specific learned file
-                 # FIX: Use 'image_path', not 'image' (which might be a Scryfall URL)
-                 l_path = cand['image_path'] 
-                 
-                 patch_data = utils_ai.get_learned_patch(l_path)
-                 
-                 if patch_data:
-                     # Run Spatial Verification!
-                     ref_art = patch_data["art"] # Already on device
-                     ref_full = patch_data["full"]
-                     
-                     # Spatial Check 0
-                     score_0 = utils_ai.spatial_verification(crop_art_0, crop_full_0, ref_art, ref_full)
-                     # Spatial Check 180
-                     score_180 = utils_ai.spatial_verification(crop_art_180, crop_full_180, ref_art, ref_full)
-                     
-                     # Result
-                     spatial_score = max(score_0, score_180)
-                     
-                     
-                     # STRICT GATE: Learned cards must match their memory strongly (> 0.6)
-                     # or we reject them as false positives from other cards.
-                     if spatial_score < 0.6:
-                         print(f"REJECTED Learned '{cand['name']}': Spatial {spatial_score:.3f} < 0.6")
-                         # Penalize heavily to prevent winning
-                         final_score = 0.0
-                     else:
-                         # JEALOUSY CHECK: Does it look at least vaguely like the real card?
-                         # Prevents "Blurry Yuna" from claiming "Tidus" just because Tidus looks like a blur.
-                         pristine_score = 1.0 # Default pass if no patches
-                         if sid in utils_ai.art_patches:
-                             p_data = utils_ai.art_patches[sid]
-                             p_ref_art = p_data["art"].to(utils_ai.device)
-                             p_ref_full = p_data["full"].to(utils_ai.device)
-                             
-                             p_score_0 = utils_ai.spatial_verification(crop_art_0, crop_full_0, p_ref_art, p_ref_full)
-                             p_score_180 = utils_ai.spatial_verification(crop_art_180, crop_full_180, p_ref_art, p_ref_full)
-                             pristine_score = max(p_score_0, p_score_180)
-                         
-                         if pristine_score < 0.25 and spatial_score < 0.85:
-                             print(f"REJECTED Learned '{cand['name']}': Jealousy Check Failed (Pristine {pristine_score:.3f} < 0.25)")
-                             final_score = 0.0
-                         else:
-                             print(f"Verified Learned '{cand['name']}': Global={cand['global_score']:.3f}, Spatial={spatial_score:.3f}, Pristine={pristine_score:.3f}")
-                             # High score for good match
-                             final_score = (0.4 * cand["global_score"]) + (0.6 * spatial_score)
-                     
-                     all_candidates.append({
-                         **cand, 
-                         "score": final_score,
-                         "spatial_verification": spatial_score
-                     })
-                     continue
-                 else:
-                     print(f"Warning: Could not load patch for learned card {cand['name']}")
-                     # Fallback to trust if basic score is high, else penalize
-                     if cand["global_score"] > 0.85:
-                         all_candidates.append({**cand, "score": cand["global_score"], "spatial_verification": 1.0})
-                     else:
-                         all_candidates.append({**cand, "score": cand["global_score"] * 0.8, "spatial_verification": 0.0})
-                     continue
+            # Comparison Score (Standard DB) for logging/logic
+            comp_score_val = 0.0
+            comp_score_str = "N/A"
 
-            if sid in utils_ai.art_patches:
-                data = utils_ai.art_patches[sid]
-                ref_art = data["art"].to(utils_ai.device)
-                ref_full = data["full"].to(utils_ai.device)
-                
-                # Spatial Check 0
-                score_0 = utils_ai.spatial_verification(crop_art_0, crop_full_0, ref_art, ref_full)
-                # Spatial Check 180
-                score_180 = utils_ai.spatial_verification(crop_art_180, crop_full_180, ref_art, ref_full)
-                
-                spatial_score = max(score_0, score_180)
-                is_upside = score_180 > score_0
-                
-                # Color Logic
-                color_weight = 0.0
-                try:
-                    active_art = art_pil_upside if is_upside else art_pil
-                    webcam_color = utils_ai.get_dominant_color_type(active_art)
-                    card_colors = cand.get('color_identity', [])
-                    
-                    if webcam_color != "C":
-                        # Simplification of color logic for readability
-                        if webcam_color in card_colors:
-                            color_weight = 0.05 # Bonus
-                        elif len(card_colors) > 0:
-                            color_weight = -0.03 # Penalty
-                except:
-                    pass
-                
-                # Blending
-                g_score = cand["global_score"]
-                final_score = (0.3 * g_score) + (0.7 * spatial_score) + color_weight
-                
-                all_candidates.append({
-                    **cand,
-                    "score": final_score,
-                    "spatial_verification": spatial_score
-                })
+            # A. Learned Verification
+            if is_learned:
+                 l_path = cand['image_path'] 
+                 patch_data = utils_ai.get_learned_patch(l_path)
+                 if patch_data:
+                     # Verify against Learned Image
+                     p_art = patch_data["art"]
+                     p_full = patch_data["full"]
+                     s0 = utils_ai.spatial_verification(crop_art_0, crop_full_0, p_art, p_full)
+                     s180 = utils_ai.spatial_verification(crop_art_180, crop_full_180, p_art, p_full)
+                     raw_spatial = max(s0, s180)
+                     
+                     # FOR LOGGING & LOGIC: Comp Score (Check against Main Database)
+                     if sid in utils_ai.art_patches:
+                         d = utils_ai.art_patches[sid]
+                         c_s0 = utils_ai.spatial_verification(crop_art_0, crop_full_0, d["art"].to(utils_ai.device), d["full"].to(utils_ai.device))
+                         c_s180 = utils_ai.spatial_verification(crop_art_180, crop_full_180, d["art"].to(utils_ai.device), d["full"].to(utils_ai.device))
+                         c_spatial = max(c_s0, c_s180)
+                         # Calculate what base score would be
+                         c_base = (0.4 * cand["global_score"]) + (0.6 * c_spatial)
+                         comp_score_val = c_base
+                         comp_score_str = f"{c_base:.3f}"
+                 else:
+                     # Fallback if file missing
+                     raw_spatial = 0.0
+            
+            # B. Standard Verification
+            elif sid in utils_ai.art_patches:
+                 data = utils_ai.art_patches[sid]
+                 p_art = data["art"].to(utils_ai.device)
+                 p_full = data["full"].to(utils_ai.device)
+                 s0 = utils_ai.spatial_verification(crop_art_0, crop_full_0, p_art, p_full)
+                 s180 = utils_ai.spatial_verification(crop_art_180, crop_full_180, p_art, p_full)
+                 raw_spatial = max(s0, s180)
+            
+            # Store Result
+            # Base Score formula: 40% Global + 60% Spatial
+            base_score = (0.4 * cand["global_score"]) + (0.6 * raw_spatial)
+            
+            cand_data = {
+                **cand,
+                "raw_spatial": raw_spatial,
+                "base_score": base_score,
+                "comp_score_val": comp_score_val,
+                "comp_score_str": comp_score_str
+            }
+            
+            processed_candidates.append(cand_data)
+            
+            # Track for stats (only count non-zero spatial to avoid skewing?)
+            # Actually, zero is a valid score (no match).
+            if is_learned:
+                learned_scores.append(base_score)
             else:
-                 all_candidates.append({**cand, "score": cand["global_score"], "spatial_verification": 0.0})
+                standard_scores.append(base_score)
+
+        # Pass 2: Calculate Dynamic Penalty
+        penalty = 0.0
+        if standard_scores and learned_scores:
+            # FIX: Only look at the TOP K scores to avoid dilution from low-scoring noise
+            k_top = 5 
+            top_std = sorted(standard_scores, reverse=True)[:k_top]
+            top_lrn = sorted(learned_scores, reverse=True)[:k_top]
+            
+            avg_std = sum(top_std) / len(top_std)
+            avg_lrn = sum(top_lrn) / len(top_lrn)
+            
+            gap = avg_lrn - avg_std
+            if gap > 0:
+                # User Suggestion: "Dynamic ratio" - 1.0 was too harsh (overcorrection).
+                # Trying 0.9 to find the sweet spot.
+                penalty = gap * 0.9
+                print(f"Dynamic Scoring (Top {k_top}): AvgStd={avg_std:.3f}, AvgLrn={avg_lrn:.3f}, Gap={gap:.3f} -> Penalty={penalty:.3f}")
+        
+        # Pass 3: Apply Penalty & Build Final List
+        all_candidates = []
+        for c in processed_candidates:
+            final_score = c["base_score"]
+            if c.get("learned", False):
+                penalized_score = max(0.0, final_score - penalty)
+                
+                # REVERTED: We strictly use the Penalized Score.
+                # "Main Score" is inflated by the shared Global Score (Learned Vector),
+                # so using it bypasses the necessary penalty.
+                final_score = penalized_score
+                
+                if c["raw_spatial"] > 0:
+                    print(f"Verified Learned '{c['name']}': Raw={c['base_score']:.3f} - Pen={penalty:.3f} = {final_score:.3f} | Main={c['comp_score_str']} (Ignored)")
+            
+            all_candidates.append({
+                **c,
+                "score": final_score,
+                "spatial_verification": c["raw_spatial"]
+            })
 
         # Sort and Return
         all_candidates.sort(key=lambda x: x['score'], reverse=True)
